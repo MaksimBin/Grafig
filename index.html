@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ротационный график</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { margin:0; font-family:system-ui,sans-serif; background:#0f1216; color:#e7edf6; }
+    .wrap { max-width:960px; margin:20px auto; padding:0 16px; }
+    h1 { font-size:24px; margin:16px 0; }
+    .panel { background:#151a21; border:1px solid #222a33; border-radius:12px; padding:16px; }
+    label { font-size:14px; color:#a9b4c4; display:block; margin-bottom:4px; }
+    input, textarea { width:100%; padding:10px; border-radius:10px; border:1px solid #222a33; background:#10151c; color:#e7edf6; font-size:15px; }
+    textarea { min-height:60px; }
+    .actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
+    button { flex:1; min-height:44px; padding:10px; border-radius:10px; border:1px solid #222a33; background:#18202a; color:#e7edf6; font-size:15px; }
+    .primary { background:linear-gradient(180deg,#2a7fff,#6bd1ff); color:#0a0e13; font-weight:600; }
+    .card { background:#0f141b; border:1px solid #222a33; border-radius:10px; padding:10px; margin-top:12px; }
+    .schedule-block {
+      background:#ffe066; color:#0f1216;
+      padding:6px 10px; border-radius:8px;
+      margin:4px 4px 4px 0; font-size:14px;
+      display:inline-block; cursor:pointer;
+    }
+    .popup {
+      display:none; position:fixed; inset:0;
+      background:rgba(0,0,0,0.9); justify-content:center; align-items:center; z-index:1000;
+    }
+    .popup-content {
+      position:relative; background:#000; padding:20px; border-radius:12px;
+      max-width:90%; max-height:90%; overflow:auto;
+    }
+    .popup-content h2 { color:#fff; margin-bottom:12px; }
+    .close-btn { position:absolute; top:10px; right:10px; background:transparent; border:none; color:#fff; font-size:22px; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Часовой График</h1>
+    <div class="panel">
+      <label>Список людей (через запятую)</label>
+      <textarea id="peopleInput">Анна, Богдан, София, Максим</textarea>
+      <label>Начало графика</label>
+      <input id="startAtInput" type="datetime-local" />
+      <label>Длительность смены (часы)</label>
+      <input id="shiftHoursInput" type="number" value="3" />
+      <label>Пауза между сменами (мин)</label>
+      <input id="gapMinutesInput" type="number" value="0" />
+      <label>На сколько дней строить график</label>
+      <input id="daysInput" type="number" value="30" />
+      <div class="actions">
+        <button class="primary" id="buildBtn">Собрать расписание</button>
+        <button id="nowBtn">Кто сейчас?</button>
+      </div>
+    </div>
+
+    <div class="card"><h3>Текущий статус</h3><div id="currentStatus">—</div></div>
+    <div class="card">
+      <h3>Расписание по людям</h3>
+      <div id="scheduleText">—</div>
+    </div>
+  </div>
+
+  <!-- Попап -->
+  <div id="popup" class="popup" aria-modal="true" role="dialog">
+    <div class="popup-content">
+      <button class="close-btn" id="popupClose">✖</button>
+      <h2 id="popupTitle"></h2>
+      <div id="popupBody"></div>
+    </div>
+  </div>
+
+<script>
+  // ===== Utils =====
+  function parsePeople(text){ return text.split(',').map(s=>s.trim()).filter(Boolean); }
+  function fmt(dt){
+    const p=n=>String(n).padStart(2,'0');
+    const days=["Вс","Пн","Вт","Ср","Чт","Пт","Сб"];
+    return `${days[dt.getDay()]} ${p(dt.getHours())}:${p(dt.getMinutes())}`;
+  }
+  function toLocalDateTimeValue(d=new Date()){
+    const pad=n=>String(n).padStart(2,'0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  function parseLocalDateTime(str){
+    // "YYYY-MM-DDTHH:mm" → Date(year, month-1, day, hour, minute)
+    if(!str || typeof str!=='string' || !str.includes('T')) return null;
+    const [date, time] = str.split('T');
+    const [y,m,d] = date.split('-').map(Number);
+    const [hh,mm] = time.split(':').map(Number);
+    if([y,m,d,hh,mm].some(n=>Number.isNaN(n))) return null;
+    return new Date(y, m-1, d, hh, mm);
+  }
+
+  // ===== Core =====
+  function generateRotationSchedule(people,startAt,shiftHours,gapMinutes=0,days=30){
+    if(!people.length) throw new Error("Список людей пуст");
+    if(!(startAt instanceof Date) || isNaN(startAt)) throw new Error("Некорректная дата начала");
+    const schedule=[],shiftMs=shiftHours*3600000,gapMs=gapMinutes*60000,totalMs=days*24*3600000;
+    let cursor=new Date(startAt),elapsed=0,i=0;
+    while(elapsed<totalMs){
+      const person=people[i%people.length];
+      const start=new Date(cursor),end=new Date(start.getTime()+shiftMs);
+      schedule.push({person,start,end});
+      cursor=new Date(end.getTime()+gapMs);
+      elapsed=cursor.getTime()-startAt.getTime();
+      i++;
+    }
+    return schedule;
+  }
+  function whoIsOnShift(people,startAt,shiftHours,gapMinutes=0,at=new Date()){
+    const shiftMs=shiftHours*3600000,gapMs=gapMinutes*60000,blockMs=shiftMs+gapMs,diffMs=at.getTime()-startAt.getTime();
+    if(diffMs<0) return {person:people[0],start:startAt,end:new Date(startAt.getTime()+shiftMs)};
+    const blocks=Math.floor(diffMs/blockMs),person=people[blocks%people.length];
+    const start=new Date(startAt.getTime()+blocks*blockMs),end=new Date(start.getTime()+shiftMs);
+    if(gapMs>0 && at>=end && at<new Date(end.getTime()+gapMs)) return {person:null,start,end};
+    return {person,start,end};
+  }
+
+  // ===== DOM refs =====
+  const peopleInput=document.getElementById('peopleInput'),
+        startAtInput=document.getElementById('startAtInput'),
+        shiftHoursInput=document.getElementById('shiftHoursInput'),
+        gapMinutesInput=document.getElementById('gapMinutesInput'),
+        daysInput=document.getElementById('daysInput'),
+        buildBtn=document.getElementById('buildBtn'),
+        nowBtn=document.getElementById('nowBtn'),
+        scheduleText=document.getElementById('scheduleText'),
+        currentStatus=document.getElementById('currentStatus'),
+        popup=document.getElementById('popup'),
+        popupTitle=document.getElementById('popupTitle'),
+        popupBody=document.getElementById('popupBody'),
+        popupClose=document.getElementById('popupClose');
+
+  // ===== State =====
+  let schedule=[], grouped={};
+
+  // ===== Render =====
+  function renderSchedule(people){
+    grouped={};
+    for(const s of schedule){
+      if(!grouped[s.person]) grouped[s.person]=[];
+      grouped[s.person].push(`${fmt(s.start)} → ${fmt(s.end)}`);
+    }
+    let html="";
+    for(const person of people){
+      if(grouped[person]){
+        html+=`<div><b>${person}:</b><br>`;
+        for(const shift of grouped[person]){
+          html+=`<span class="schedule-block" data-person="${person}">${shift}</span> `;
+        }
+        html+="</div><br>";
+      }
+    }
+    scheduleText.innerHTML=html || "—";
+  }
+
+  function renderCurrentStatus(people,startAt,shiftHours,gapMinutes){
+    const info=whoIsOnShift(people,startAt,shiftHours,gapMinutes,new Date());
+    currentStatus.innerHTML=info.person
+      ? `<b>${info.person}</b> с ${fmt(info.start)} до ${fmt(info.end)}`
+      : `Сейчас пауза`;
+  }
+
+  // ===== Popup =====
+  function openPopup(person){
+    popupTitle.textContent = person;
+    const shifts = grouped[person] || [];
+    popupBody.innerHTML = shifts.length
+      ? shifts.map(s=>`<div class="schedule-block">${s}</div>`).join('')
+      : '<div class="schedule-block">Нет смен</div>';
+    popup.style.display='flex';
+  }
+  function closePopup(){ popup.style.display='none'; }
+
+  scheduleText.addEventListener('click',(e)=>{
+    const el=e.target;
+    if(el.classList.contains('schedule-block')){
+      const person = el.getAttribute('data-person');
+      if(person) openPopup(person);
+    }
+  });
+  popupClose.addEventListener('click', closePopup);
+  popup.addEventListener('click',(e)=>{ if(e.target===popup) closePopup(); });
+  document.addEventListener('keydown',(e)=>{ if(e.key==='Escape' && popup.style.display==='flex') closePopup(); });
+
+  // ===== Persistence =====
+  const LS_KEY = 'rotationData_v1';
+
+  function saveToStorage({peopleRaw,startAtRaw,shiftHoursRaw,gapMinutesRaw,daysRaw,schedule}){
+    const payload = {
+      peopleRaw, startAtRaw, shiftHoursRaw, gapMinutesRaw, daysRaw,
+      schedule: schedule.map(s=>({person:s.person,start:s.start.toISOString(),end:s.end.toISOString()}))
+    };
+    localStorage.setItem(LS_KEY, JSON.stringify(payload));
+  }
+
+  function loadFromStorage(){
+    const raw = localStorage.getItem(LS_KEY);
+    if(!raw) return null;
+    try{
+      const data = JSON.parse(raw);
+      if(!data) return null;
+      const people = parsePeople(data.peopleRaw || '');
+      const startAt = parseLocalDateTime(data.startAtRaw) || new Date();
+      const shiftHours = Number(data.shiftHoursRaw || 3);
+      const gapMinutes = Number(data.gapMinutesRaw || 0);
+      const days = Number(data.daysRaw || 30);
+      const restoredSchedule = Array.isArray(data.schedule)
+        ? data.schedule.map(s=>({person:s.person,start:new Date(s.start),end:new Date(s.end)}))
+        : [];
+      return {people, startAt, shiftHours, gapMinutes, days, peopleRaw:data.peopleRaw, startAtRaw:data.startAtRaw, schedule:restoredSchedule};
+    }catch(e){
+      console.warn('Storage parse error', e);
+      return null;
+    }
+  }
+
+  // ===== Build flow =====
+  function build(){
+    const people = parsePeople(peopleInput.value);
+    const startAt = parseLocalDateTime(startAtInput.value) || new Date();
+    const shiftHours = Number(shiftHoursInput.value);
+    const gapMinutes = Number(gapMinutesInput.value);
+    const days = Number(daysInput.value);
+
+    try{
+      schedule = generateRotationSchedule(people,startAt,shiftHours,gapMinutes,days);
+      renderSchedule(people);
+      renderCurrentStatus(people,startAt,shiftHours,gapMinutes);
+
+      // save
+      saveToStorage({
+        peopleRaw: peopleInput.value,
+        startAtRaw: startAtInput.value || toLocalDateTimeValue(startAt),
+        shiftHoursRaw: shiftHoursInput.value,
+        gapMinutesRaw: gapMinutesInput.value,
+        daysRaw: daysInput.value,
+        schedule
+      });
+    }catch(e){
+      alert(e.message);
+    }
+  }
+
+  function init(){
+    // default datetime-local value
+    if(!startAtInput.value) startAtInput.value = toLocalDateTimeValue(new Date());
+
+    const loaded = loadFromStorage();
+    if(loaded){
+      // restore inputs
+      if(typeof loaded.peopleRaw==='string') peopleInput.value = loaded.peopleRaw;
+      if(typeof loaded.startAtRaw==='string' && loaded.startAtRaw) startAtInput.value = loaded.startAtRaw;
+      // We keep numeric inputs as they are if missing
+      // rebuild from loaded schedule or recompute
+      const people = parsePeople(peopleInput.value);
+      const startAt = parseLocalDateTime(startAtInput.value) || new Date();
+      const shiftHours = Number(shiftHoursInput.value);
+      const gapMinutes = Number(gapMinutesInput.value);
+
+      schedule = loaded.schedule && loaded.schedule.length ? loaded.schedule : [];
+      if(!schedule.length){
+        // If no schedule saved, compute it with current inputs
+        try{
+          schedule = generateRotationSchedule(people,startAt,shiftHours,gapMinutes, Number(daysInput.value));
+        }catch(e){
+          // fallback silently
+          schedule = [];
+        }
+      }
+      renderSchedule(people);
+      if(schedule.length){
+        renderCurrentStatus(people,startAt,shiftHours,gapMinutes);
+      }else{
+        currentStatus.textContent = '—';
+      }
+    }else{
+      // initial build
+      build();
+    }
+
+    // listeners
+    buildBtn.addEventListener('click', build);
+    nowBtn.addEventListener('click', ()=>{
+      const people=parsePeople(peopleInput.value);
+      const startAt=parseLocalDateTime(startAtInput.value) || new Date();
+      renderCurrentStatus(people,startAt,Number(shiftHoursInput.value),Number(gapMinutesInput.value));
+    });
+  }
+
+  // Start
+  init();
+</script>
+</body>
+</html>
